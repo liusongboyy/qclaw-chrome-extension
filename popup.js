@@ -1,13 +1,13 @@
 // QClaw Chrome Extension - Popup Script
+// Uses WebSocket to connect to QClaw Gateway
 
-// Configuration
 const QCLAW_HOST = 'localhost';
 const QCLAW_PORT = 18789;
 const AUTH_TOKEN = 'ed880d4d890f158a5773f9108f71fe73c2a25301e17f01b1';
 
 let ws = null;
-let reconnectTimer = null;
-let messageId = 0;
+let isConnected = false;
+let pendingResponses = {};
 
 // DOM Elements
 const connectionStatus = document.getElementById('connectionStatus');
@@ -21,136 +21,167 @@ const btnOpenPanel = document.getElementById('btnOpenPanel');
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
-  connectWebSocket();
   setupEventListeners();
+  connect();
 });
 
-// WebSocket connection
-function connectWebSocket() {
-  const wsUrl = `ws://${QCLAW_HOST}:${QCLAW_PORT}/`;
-  
-  try {
-    ws = new WebSocket(wsUrl);
+// Connect to QClaw via WebSocket
+function connect() {
+  return new Promise((resolve, reject) => {
+    const wsUrl = `ws://${QCLAW_HOST}:${QCLAW_PORT}/`;
+    console.log('Connecting to:', wsUrl);
     
-    ws.onopen = () => {
-      console.log('WebSocket connected, performing handshake...');
-      sendConnectHandshake();
-    };
-    
-    ws.onmessage = (event) => {
-      handleMessage(JSON.parse(event.data));
-    };
-    
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setDisconnected();
-    };
-    
-    ws.onclose = () => {
-      console.log('WebSocket closed');
-      setDisconnected();
-      // Reconnect after 3 seconds
-      if (!reconnectTimer) {
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          connectWebSocket();
-        }, 3000);
-      }
-    };
-  } catch (error) {
-    console.error('Failed to connect:', error);
-    setDisconnected();
-  }
-}
-
-// Send connect handshake
-function sendConnectHandshake() {
-  sendRequest('connect', {
-    minProtocol: 3,
-    maxProtocol: 3,
-    client: {
-      id: 'chrome-extension',
-      version: '1.0.0',
-      platform: 'chrome',
-      mode: 'operator'
-    },
-    role: 'operator',
-    scopes: ['operator.read', 'operator.write'],
-    auth: { token: AUTH_TOKEN },
-    locale: 'zh-CN',
-    userAgent: 'QClaw-Extension/1.0.0'
+    try {
+      ws = new WebSocket(wsUrl);
+      
+      ws.onopen = () => {
+        console.log('WebSocket open, sending connect...');
+        send({
+          type: 'req',
+          id: 'connect',
+          method: 'connect',
+          params: {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: {
+              id: 'chrome-extension',
+              version: '1.0.0',
+              platform: 'chrome',
+              mode: 'operator'
+            },
+            role: 'operator',
+            scopes: ['operator.read', 'operator.write'],
+            auth: { token: AUTH_TOKEN },
+            locale: 'zh-CN',
+            userAgent: 'QClaw-Extension/1.0.0'
+          }
+        });
+      };
+      
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          console.log('Received:', msg);
+          handleMessage(msg, resolve);
+        } catch (e) {
+          console.error('Parse error:', e);
+        }
+      };
+      
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setDisconnected();
+        reject(error);
+      };
+      
+      ws.onclose = () => {
+        console.log('WebSocket closed');
+        isConnected = false;
+        setDisconnected();
+      };
+      
+      // Timeout for connection
+      setTimeout(() => {
+        if (!isConnected) {
+          reject(new Error('Connection timeout'));
+        }
+      }, 5000);
+      
+    } catch (error) {
+      console.error('Connect error:', error);
+      reject(error);
+    }
   });
 }
 
-// Handle incoming messages
-function handleMessage(msg) {
-  console.log('Received:', msg);
-  
-  if (msg.type === 'event' && msg.event === 'connect.challenge') {
-    // Got challenge, already responded with handshake
-    return;
-  }
-  
-  if (msg.type === 'res' && msg.id === 'connect') {
-    if (msg.ok) {
-      setConnected();
-    } else {
-      setDisconnected();
-      console.error('Connection rejected:', msg);
-    }
-    return;
-  }
-  
-  // Handle command responses
-  if (msg.type === 'res' && msg.id && msg.id.startsWith('cmd-')) {
-    if (msg.ok) {
-      showResponse('命令已发送', 'success');
-    } else {
-      showResponse(msg.error || '命令执行失败', 'error');
-    }
-  }
-}
-
-// Send request via WebSocket
-function sendRequest(method, params) {
+// Send JSON via WebSocket
+function send(data) {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    const id = `${method}-${Date.now()}`;
-    ws.send(JSON.stringify({
-      type: 'req',
-      id: id,
-      method: method,
-      params: params
-    }));
-    return id;
-  } else {
-    console.error('WebSocket not connected');
-    return null;
+    ws.send(JSON.stringify(data));
+    return true;
+  }
+  return false;
+}
+
+// Handle incoming messages
+function handleMessage(msg, connectResolve) {
+  // Connection response
+  if (msg.id === 'connect') {
+    if (msg.ok) {
+      console.log('Connected successfully!');
+      isConnected = true;
+      setConnected();
+      if (connectResolve) connectResolve();
+    } else {
+      console.error('Connection rejected:', msg.error);
+      setDisconnected();
+    }
+    return;
+  }
+  
+  // Command responses
+  if (msg.type === 'res' && msg.id && pendingResponses[msg.id]) {
+    const resolver = pendingResponses[msg.id];
+    delete pendingResponses[msg.id];
+    
+    if (msg.ok) {
+      resolver.resolve(msg.payload || msg.result);
+    } else {
+      resolver.reject(new Error(msg.error || 'Command failed'));
+    }
+  }
+  
+  // Events (like agent responses)
+  if (msg.type === 'event') {
+    console.log('Event:', msg.event, msg.payload);
+    if (msg.event === 'agent.response') {
+      showResponse(msg.payload?.message || '收到响应', 'success');
+    }
   }
 }
 
-// Send command
+// Send command with promise-based response
 function sendCommand() {
   const command = commandInput.value.trim();
   if (!command) return;
   
-  showResponse('正在发送命令...', 'loading');
+  if (!isConnected) {
+    showResponse('未连接，正在重连...', 'error');
+    connect().then(() => sendCommand());
+    return;
+  }
+  
+  showResponse('正在发送...', 'loading');
   btnSend.disabled = true;
   
-  const id = sendRequest('agent.prompt', { 
-    message: command,
-    sessionId: 'main'
+  const id = 'cmd-' + Date.now();
+  
+  const promise = new Promise((resolve, reject) => {
+    pendingResponses[id] = { resolve, reject };
+    setTimeout(() => {
+      if (pendingResponses[id]) {
+        delete pendingResponses[id];
+        reject(new Error('Timeout'));
+      }
+    }, 10000);
   });
   
-  if (id) {
-    // Wait for response
-    setTimeout(() => {
-      btnSend.disabled = false;
-    }, 2000);
+  if (send({ type: 'req', id, method: 'agent.prompt', params: { message: command } })) {
+    promise
+      .then(() => {
+        showResponse('命令已发送', 'success');
+        commandInput.value = '';
+      })
+      .catch((err) => {
+        showResponse(err.message, 'error');
+      })
+      .finally(() => {
+        btnSend.disabled = false;
+      });
   } else {
-    showResponse('未连接到QClaw', 'error');
+    showResponse('发送失败', 'error');
     btnSend.disabled = false;
   }
-  commandInput.value = '';
 }
 
 // Take screenshot
@@ -159,20 +190,19 @@ async function takeScreenshot() {
   
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-      format: 'png',
-      quality: 100
-    });
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png', quality: 100 });
     
-    sendRequest('browser.screenshot', {
-      image: dataUrl,
-      tabId: tab.id,
-      url: tab.url
-    });
-    
+    if (isConnected) {
+      send({
+        type: 'req',
+        id: 'screenshot-' + Date.now(),
+        method: 'agent.prompt',
+        params: { message: `[截图] ${dataUrl}` }
+      });
+    }
     showResponse('截图已发送', 'success');
   } catch (error) {
-    showResponse('截图失败: ' + error.message, 'error');
+    showResponse('截图失败', 'error');
   }
 }
 
@@ -190,9 +220,14 @@ async function readClipboard() {
       }
     });
     
-    const text = results[0].result;
-    if (text) {
-      sendRequest('clipboard.write', { text });
+    const text = results[0]?.result;
+    if (text && isConnected) {
+      send({
+        type: 'req',
+        id: 'clipboard-' + Date.now(),
+        method: 'agent.prompt',
+        params: { message: `[剪贴板内容]\n${text}` }
+      });
       showResponse(`剪贴板已发送 (${text.length}字符)`, 'success');
     } else {
       showResponse('剪贴板为空', 'error');
@@ -217,8 +252,16 @@ async function getPageInfo() {
       })
     });
     
-    sendRequest('page.info', results[0].result);
-    showResponse(`页面: ${results[0].result.title}`, 'success');
+    const info = results[0]?.result;
+    if (info && isConnected) {
+      send({
+        type: 'req',
+        id: 'pageinfo-' + Date.now(),
+        method: 'agent.prompt',
+        params: { message: `[页面信息]\n标题: ${info.title}\nURL: ${info.url}\n描述: ${info.description}` }
+      });
+    }
+    showResponse(`页面: ${info?.title || '未知'}`, 'success');
   } catch (error) {
     showResponse('获取失败', 'error');
   }
