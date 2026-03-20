@@ -1,8 +1,13 @@
 // QClaw Chrome Extension - Popup Script
 
 // Configuration
-const QCLAW_HOST = 'http://localhost:8080';
-const API_BASE = `${QCLAW_HOST}/api`;
+const QCLAW_HOST = 'localhost';
+const QCLAW_PORT = 18789;
+const AUTH_TOKEN = 'ed880d4d890f158a5773f9108f71fe73c2a25301e17f01b1';
+
+let ws = null;
+let reconnectTimer = null;
+let messageId = 0;
 
 // DOM Elements
 const connectionStatus = document.getElementById('connectionStatus');
@@ -15,119 +20,158 @@ const btnPageInfo = document.getElementById('btnPageInfo');
 const btnOpenPanel = document.getElementById('btnOpenPanel');
 
 // Initialize
-document.addEventListener('DOMContentLoaded', async () => {
-  await checkConnection();
+document.addEventListener('DOMContentLoaded', () => {
+  connectWebSocket();
   setupEventListeners();
 });
 
-// Check QClaw connection
-async function checkConnection() {
+// WebSocket connection
+function connectWebSocket() {
+  const wsUrl = `ws://${QCLAW_HOST}:${QCLAW_PORT}/`;
+  
   try {
-    const response = await fetch(`${API_BASE}/status`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' }
-    });
+    ws = new WebSocket(wsUrl);
     
-    if (response.ok) {
-      connectionStatus.classList.add('connected');
-      connectionStatus.querySelector('.status-text').textContent = '已连接';
-    } else {
+    ws.onopen = () => {
+      console.log('WebSocket connected, performing handshake...');
+      sendConnectHandshake();
+    };
+    
+    ws.onmessage = (event) => {
+      handleMessage(JSON.parse(event.data));
+    };
+    
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
       setDisconnected();
-    }
+    };
+    
+    ws.onclose = () => {
+      console.log('WebSocket closed');
+      setDisconnected();
+      // Reconnect after 3 seconds
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connectWebSocket();
+        }, 3000);
+      }
+    };
   } catch (error) {
-    console.error('Connection check failed:', error);
+    console.error('Failed to connect:', error);
     setDisconnected();
   }
 }
 
-function setDisconnected() {
-  connectionStatus.classList.remove('connected');
-  connectionStatus.querySelector('.status-text').textContent = '未连接';
-}
-
-// Setup event listeners
-function setupEventListeners() {
-  // Send button
-  btnSend.addEventListener('click', sendCommand);
-  
-  // Enter key in input
-  commandInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') {
-      sendCommand();
-    }
+// Send connect handshake
+function sendConnectHandshake() {
+  sendRequest('connect', {
+    minProtocol: 3,
+    maxProtocol: 3,
+    client: {
+      id: 'chrome-extension',
+      version: '1.0.0',
+      platform: 'chrome',
+      mode: 'operator'
+    },
+    role: 'operator',
+    scopes: ['operator.read', 'operator.write'],
+    auth: { token: AUTH_TOKEN },
+    locale: 'zh-CN',
+    userAgent: 'QClaw-Extension/1.0.0'
   });
-  
-  // Quick action buttons
-  btnScreenshot.addEventListener('click', takeScreenshot);
-  btnClipboard.addEventListener('click', readClipboard);
-  btnPageInfo.addEventListener('click', getPageInfo);
-  btnOpenPanel.addEventListener('click', openControlPanel);
 }
 
-// Send command to QClaw
-async function sendCommand() {
+// Handle incoming messages
+function handleMessage(msg) {
+  console.log('Received:', msg);
+  
+  if (msg.type === 'event' && msg.event === 'connect.challenge') {
+    // Got challenge, already responded with handshake
+    return;
+  }
+  
+  if (msg.type === 'res' && msg.id === 'connect') {
+    if (msg.ok) {
+      setConnected();
+    } else {
+      setDisconnected();
+      console.error('Connection rejected:', msg);
+    }
+    return;
+  }
+  
+  // Handle command responses
+  if (msg.type === 'res' && msg.id && msg.id.startsWith('cmd-')) {
+    if (msg.ok) {
+      showResponse('命令已发送', 'success');
+    } else {
+      showResponse(msg.error || '命令执行失败', 'error');
+    }
+  }
+}
+
+// Send request via WebSocket
+function sendRequest(method, params) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const id = `${method}-${Date.now()}`;
+    ws.send(JSON.stringify({
+      type: 'req',
+      id: id,
+      method: method,
+      params: params
+    }));
+    return id;
+  } else {
+    console.error('WebSocket not connected');
+    return null;
+  }
+}
+
+// Send command
+function sendCommand() {
   const command = commandInput.value.trim();
   if (!command) return;
   
   showResponse('正在发送命令...', 'loading');
   btnSend.disabled = true;
   
-  try {
-    const response = await fetch(`${API_BASE}/command`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command })
-    });
-    
-    const data = await response.json();
-    
-    if (response.ok) {
-      showResponse(data.message || '命令已发送', 'success');
-      commandInput.value = '';
-    } else {
-      showResponse(data.error || '命令执行失败', 'error');
-    }
-  } catch (error) {
-    console.error('Send command failed:', error);
-    showResponse('无法连接到QClaw服务', 'error');
-  } finally {
+  const id = sendRequest('agent.prompt', { 
+    message: command,
+    sessionId: 'main'
+  });
+  
+  if (id) {
+    // Wait for response
+    setTimeout(() => {
+      btnSend.disabled = false;
+    }, 2000);
+  } else {
+    showResponse('未连接到QClaw', 'error');
     btnSend.disabled = false;
   }
+  commandInput.value = '';
 }
 
-// Take screenshot of current tab
+// Take screenshot
 async function takeScreenshot() {
   showResponse('正在截取屏幕...', 'loading');
   
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    // Use chrome.tabs.captureVisibleTab
     const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
       format: 'png',
       quality: 100
     });
     
-    // Send to QClaw
-    const response = await fetch(`${API_BASE}/screenshot`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        image: dataUrl,
-        tabId: tab.id,
-        url: tab.url
-      })
+    sendRequest('browser.screenshot', {
+      image: dataUrl,
+      tabId: tab.id,
+      url: tab.url
     });
     
-    const data = await response.json();
-    
-    if (response.ok) {
-      showResponse('截图已发送给QClaw', 'success');
-    } else {
-      showResponse(data.error || '截图发送失败', 'error');
-    }
+    showResponse('截图已发送', 'success');
   } catch (error) {
-    console.error('Screenshot failed:', error);
     showResponse('截图失败: ' + error.message, 'error');
   }
 }
@@ -138,94 +182,81 @@ async function readClipboard() {
   
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    // Execute script to read clipboard
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       function: async () => {
-        try {
-          return await navigator.clipboard.readText();
-        } catch (e) {
-          return null;
-        }
+        try { return await navigator.clipboard.readText(); } 
+        catch (e) { return null; }
       }
     });
     
-    const clipboardText = results[0].result;
-    
-    if (clipboardText) {
-      // Send to QClaw
-      await fetch(`${API_BASE}/clipboard`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: clipboardText })
-      });
-      
-      showResponse(`剪贴板内容已发送 (${clipboardText.length}字符)`, 'success');
+    const text = results[0].result;
+    if (text) {
+      sendRequest('clipboard.write', { text });
+      showResponse(`剪贴板已发送 (${text.length}字符)`, 'success');
     } else {
-      showResponse('剪贴板为空或无法读取', 'error');
+      showResponse('剪贴板为空', 'error');
     }
   } catch (error) {
-    console.error('Clipboard read failed:', error);
-    showResponse('读取剪贴板失败', 'error');
+    showResponse('读取失败', 'error');
   }
 }
 
-// Get current page info
+// Get page info
 async function getPageInfo() {
   showResponse('正在获取页面信息...', 'loading');
   
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    // Get page info via script execution
     const results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      function: () => {
-        return {
-          title: document.title,
-          url: window.location.href,
-          description: document.querySelector('meta[name="description"]')?.content || '',
-          keywords: document.querySelector('meta[name="keywords"]')?.content || '',
-          selectors: {
-            headings: document.querySelectorAll('h1, h2, h3').length,
-            links: document.querySelectorAll('a').length,
-            images: document.querySelectorAll('img').length,
-            buttons: document.querySelectorAll('button').length
-          }
-        };
-      }
+      function: () => ({
+        title: document.title,
+        url: window.location.href,
+        description: document.querySelector('meta[name="description"]')?.content || ''
+      })
     });
     
-    const pageInfo = results[0].result;
-    
-    // Send to QClaw
-    await fetch(`${API_BASE}/pageinfo`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(pageInfo)
-    });
-    
-    showResponse(`页面: ${pageInfo.title}`, 'success');
+    sendRequest('page.info', results[0].result);
+    showResponse(`页面: ${results[0].result.title}`, 'success');
   } catch (error) {
-    console.error('Get page info failed:', error);
-    showResponse('获取页面信息失败', 'error');
+    showResponse('获取失败', 'error');
   }
 }
 
-// Open QClaw control panel
+// Open control panel
 function openControlPanel() {
-  window.open(QCLAW_HOST, '_blank');
+  window.open(`http://${QCLAW_HOST}:${QCLAW_PORT}/`, '_blank');
 }
 
-// Show response message
+// UI helpers
+function setConnected() {
+  connectionStatus.classList.add('connected');
+  connectionStatus.querySelector('.status-text').textContent = '已连接';
+}
+
+function setDisconnected() {
+  connectionStatus.classList.remove('connected');
+  connectionStatus.querySelector('.status-text').textContent = '未连接';
+}
+
 function showResponse(message, type = 'default') {
   responseArea.innerHTML = `<div class="response-content ${type}">${escapeHtml(message)}</div>`;
 }
 
-// Escape HTML to prevent XSS
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+function setupEventListeners() {
+  btnSend.addEventListener('click', sendCommand);
+  commandInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') sendCommand();
+  });
+  btnScreenshot.addEventListener('click', takeScreenshot);
+  btnClipboard.addEventListener('click', readClipboard);
+  btnPageInfo.addEventListener('click', getPageInfo);
+  btnOpenPanel.addEventListener('click', openControlPanel);
 }
