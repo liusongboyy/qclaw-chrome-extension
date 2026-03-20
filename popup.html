@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QClaw Assistant</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <span class="logo-icon">🦁</span>
+        <span class="logo-text">QClaw</span>
+      </div>
+      <div class="status" id="connectionStatus">
+        <span class="status-dot"></span>
+        <span class="status-text">Connecting...</span>
+      </div>
+    </header>
+
+    <main>
+      <div class="quick-actions">
+        <button class="action-btn" id="btnScreenshot" title="Take Screenshot">
+          <span class="btn-icon">📸</span>
+          <span class="btn-label">截图</span>
+        </button>
+        <button class="action-btn" id="btnClipboard" title="Read Clipboard">
+          <span class="btn-icon">📋</span>
+          <span class="btn-label">剪贴板</span>
+        </button>
+        <button class="action-btn" id="btnPageInfo" title="Get Page Info">
+          <span class="btn-icon">📄</span>
+          <span class="btn-label">页面信息</span>
+        </button>
+        <button class="action-btn" id="btnOpenPanel" title="Open QClaw Panel">
+          <span class="btn-icon">🖥️</span>
+          <span class="btn-label">控制面板</span>
+        </button>
+      </div>
+
+      <div class="command-input">
+        <input type="text" id="commandInput" placeholder="输入命令..." maxlength="200">
+        <button id="btnSend" class="send-btn">发送</button>
+      </div>
+
+      <div class="response-area" id="responseArea">
+        <div class="response-placeholder">等待命令...</div>
+      </div>
+    </main>
+
+    <footer>
+      <span class="version">v1.0.0</span>
+      <a href="https://github.com/openclaw/qclaw" target="_blank">GitHub</a>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
