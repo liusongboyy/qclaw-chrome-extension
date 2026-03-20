@@ -8,6 +8,7 @@ const AUTH_TOKEN = 'ed880d4d890f158a5773f9108f71fe73c2a25301e17f01b1';
 let ws = null;
 let isConnected = false;
 let pendingResponses = {};
+let connectResolve = null;
 
 // DOM Elements
 const connectionStatus = document.getElementById('connectionStatus');
@@ -30,39 +31,20 @@ function connect() {
   return new Promise((resolve, reject) => {
     const wsUrl = `ws://${QCLAW_HOST}:${QCLAW_PORT}/`;
     console.log('Connecting to:', wsUrl);
+    connectResolve = resolve;
     
     try {
       ws = new WebSocket(wsUrl);
       
       ws.onopen = () => {
-        console.log('WebSocket open, sending connect...');
-        send({
-          type: 'req',
-          id: 'connect',
-          method: 'connect',
-          params: {
-            minProtocol: 3,
-            maxProtocol: 3,
-            client: {
-              id: 'chrome-extension',
-              version: '1.0.0',
-              platform: 'chrome',
-              mode: 'operator'
-            },
-            role: 'operator',
-            scopes: ['operator.read', 'operator.write'],
-            auth: { token: AUTH_TOKEN },
-            locale: 'zh-CN',
-            userAgent: 'QClaw-Extension/1.0.0'
-          }
-        });
+        console.log('WebSocket open, waiting for challenge...');
       };
       
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
           console.log('Received:', msg);
-          handleMessage(msg, resolve);
+          handleMessage(msg);
         } catch (e) {
           console.error('Parse error:', e);
         }
@@ -82,7 +64,8 @@ function connect() {
       
       // Timeout for connection
       setTimeout(() => {
-        if (!isConnected) {
+        if (!isConnected && connectResolve) {
+          connectResolve = null;
           reject(new Error('Connection timeout'));
         }
       }, 5000);
@@ -94,24 +77,46 @@ function connect() {
   });
 }
 
-// Send JSON via WebSocket
-function send(data) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(data));
-    return true;
-  }
-  return false;
-}
-
 // Handle incoming messages
-function handleMessage(msg, connectResolve) {
+function handleMessage(msg) {
+  // Connection challenge - respond with connect request
+  if (msg.type === 'event' && msg.event === 'connect.challenge') {
+    const { nonce } = msg.payload;
+    console.log('Got challenge, nonce:', nonce);
+    
+    send({
+      type: 'req',
+      id: 'connect',
+      method: 'connect',
+      params: {
+        minProtocol: 3,
+        maxProtocol: 3,
+        client: {
+          id: 'cli',
+          version: '2026.2.1',
+          platform: 'macos',
+          mode: 'cli'
+        },
+        role: 'operator',
+        scopes: ['operator.read', 'operator.write'],
+        auth: { token: AUTH_TOKEN },
+        locale: 'zh-CN',
+        userAgent: 'openclaw-cli/2026.2.1'
+      }
+    });
+    return;
+  }
+  
   // Connection response
   if (msg.id === 'connect') {
     if (msg.ok) {
       console.log('Connected successfully!');
       isConnected = true;
       setConnected();
-      if (connectResolve) connectResolve();
+      if (connectResolve) {
+        connectResolve();
+        connectResolve = null;
+      }
     } else {
       console.error('Connection rejected:', msg.error);
       setDisconnected();
@@ -138,6 +143,15 @@ function handleMessage(msg, connectResolve) {
       showResponse(msg.payload?.message || '收到响应', 'success');
     }
   }
+}
+
+// Send JSON via WebSocket
+function send(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(data));
+    return true;
+  }
+  return false;
 }
 
 // Send command with promise-based response
